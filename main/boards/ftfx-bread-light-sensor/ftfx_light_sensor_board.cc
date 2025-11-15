@@ -21,6 +21,7 @@
 #endif
 
 #define TAG "FtfxLightSensorBoard"
+#define SILENT_TIMEOUT_US 20000000  // 20 秒静音超时
 
 class FtfxLightSensorBoard : public WifiBoard {
 private:
@@ -33,6 +34,8 @@ private:
     Button volume_up_button_;
     Button volume_down_button_;
     Button light_sensor_button_;
+    bool light_is_on_ = false;
+    esp_timer_handle_t silent_timer_handle_ = nullptr;
 
     void InitializeDisplayI2c() {
         i2c_master_bus_config_t bus_config = {
@@ -147,12 +150,29 @@ private:
             GetDisplay()->ShowNotification(Lang::Strings::MUTED);
         });
 
-        light_sensor_button_.OnPressDown([this]() {
-            ESP_LOGI(TAG, "Light sensor button pressed");
+        light_sensor_button_.OnLongPress([this]() {
+            ESP_LOGI(TAG, "Light sensor virtual button long pressed");
+            if (!light_is_on_) {
+                ESP_LOGI(TAG, "Toggling light state to ON");
+                light_is_on_ = true;
+                auto& app = Application::GetInstance();
+                auto state = app.GetDeviceState();
+                if (state == kDeviceStateIdle) {
+                    ESP_LOGI(TAG, "Invoking wake word due to light ON");
+                    app.WakeWordInvoke("（用户打开冰箱门了）");
+                }
+            }
         });
 
         light_sensor_button_.OnPressUp([this]() {
-            ESP_LOGI(TAG, "Light sensor button released");
+            ESP_LOGI(TAG, "Light sensor virtual button released");
+            ESP_LOGI(TAG, "Toggling light state to OFF");
+            light_is_on_ = false;
+            auto& app = Application::GetInstance();
+            auto state = app.GetDeviceState();
+            if (state == kDeviceStateListening || state == kDeviceStateSpeaking) {
+                app.SetDeviceState(kDeviceStateIdle);
+            }
         });
     }
 
@@ -167,12 +187,66 @@ public:
         touch_button_(TOUCH_BUTTON_GPIO),
         volume_up_button_(VOLUME_UP_BUTTON_GPIO),
         volume_down_button_(VOLUME_DOWN_BUTTON_GPIO),
-        light_sensor_button_(LIGHT_SENSOR_DO_GPIO) {
+        light_sensor_button_(LIGHT_SENSOR_DO_GPIO, false, 2000) {
         InitializeDisplayI2c();
         InitializeSsd1306Display();
         InitializeButtons();
         InitializeTools();
+
+        esp_timer_create_args_t silent_timer_args = {
+            .callback = [](void* arg) {
+                ESP_LOGI(TAG, "Silent timer triggered");
+                FtfxLightSensorBoard* board = (FtfxLightSensorBoard*)arg;
+                if (!board->light_is_on_) {
+                    ESP_LOGI(TAG, "Light is off, ignoring silent timer");
+                    return;
+                }
+                auto& app = Application::GetInstance();
+                auto state = app.GetDeviceState();
+                if (state == kDeviceStateListening) {
+                    ESP_LOGI(TAG, "Stopping listening due to silence timeout");
+                    app.StopListening();
+                    app.Schedule([&app]() {
+                        ESP_LOGI(TAG, "Invoking wake word due to silence timeout");
+                        app.WakeWordInvoke("（用户没说话）");
+                    });
+                }
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "silent_timer",
+            .skip_unhandled_events = true
+        };
+        esp_timer_create(&silent_timer_args, &silent_timer_handle_);
+
+        auto& device_event_manager = DeviceStateEventManager::GetInstance();
+        device_event_manager.RegisterStateChangeCallback([this](DeviceState previous_state, DeviceState current_state) {
+            if (silent_timer_handle_ == nullptr) {
+                return;
+            }
+            if (current_state == kDeviceStateListening && light_is_on_) {
+                if (esp_timer_is_active(silent_timer_handle_)) {
+                    ESP_LOGI(TAG, "Restarting silent timer");
+                    esp_timer_stop(silent_timer_handle_);
+                } else {
+                    ESP_LOGI(TAG, "Starting silent timer");
+                    esp_timer_start_once(silent_timer_handle_, SILENT_TIMEOUT_US);
+                }
+            } else if (esp_timer_is_active(silent_timer_handle_)) {
+                ESP_LOGI(TAG, "Stopping silent timer");
+                esp_timer_stop(silent_timer_handle_);
+            }
+        });
     }
+
+    ~FtfxLightSensorBoard() {
+        if (silent_timer_handle_ != nullptr) {
+            esp_timer_stop(silent_timer_handle_);
+            esp_timer_delete(silent_timer_handle_);
+        }
+    }
+
+    bool IsLightOn() const { return light_is_on_; }
 
     virtual Led* GetLed() override {
         static SingleLed led(BUILTIN_LED_GPIO);

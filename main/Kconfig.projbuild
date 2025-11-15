@@ -628,6 +628,13 @@ config SEND_WAKE_WORD_DATA
     help
         Send wake word data to the server as the first message of the conversation and wait for response
 
+config SEND_TEXT_WAKE_WORD
+    bool "Send Text Wake Word"
+    default y
+    depends on WAKE_WORD_DISABLED
+    help
+        Send the text wake word (triggered by program, not user voice) to the server
+
 config USE_AUDIO_PROCESSOR
     bool "Enable Audio Noise Reduction"
     default y

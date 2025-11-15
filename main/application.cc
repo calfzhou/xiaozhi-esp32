@@ -402,10 +402,11 @@ void Application::Start() {
     mcp_server.AddCommonTools();
     mcp_server.AddUserOnlyTools();
 
-    if (ota.HasMqttConfig()) {
-        protocol_ = std::make_unique<MqttProtocol>();
-    } else if (ota.HasWebsocketConfig()) {
+    // Prefer WebSocket, due to https://github.com/78/xiaozhi-esp32/issues/1215
+    if (ota.HasWebsocketConfig()) {
         protocol_ = std::make_unique<WebsocketProtocol>();
+    } else if (ota.HasMqttConfig()) {
+        protocol_ = std::make_unique<MqttProtocol>();
     } else {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
         protocol_ = std::make_unique<MqttProtocol>();
@@ -810,6 +811,10 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
             protocol_->SendAudio(std::move(packet));
         }
         // Set the chat state to wake word detected
+        protocol_->SendWakeWordDetected(wake_word);
+        SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+#elif CONFIG_SEND_TEXT_WAKE_WORD
+        // Send the text wake word to the server
         protocol_->SendWakeWordDetected(wake_word);
         SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
 #else
